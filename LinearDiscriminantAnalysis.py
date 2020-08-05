@@ -10,6 +10,7 @@ from numpy.random import randn
 from numpy.linalg import pinv, eig
 from scipy.linalg import orth
 from sklearn.mixture import GaussianMixture
+from sklearn.linear_model import LinearRegression
 
 
 class LinearDiscriminantAnalysis(object):
@@ -45,6 +46,11 @@ class LinearDiscriminantAnalysis(object):
         given, unsupervised clustering via GMM will be used with this amount of
         clusters. If None, Akaike Information Criterion (AIC) is used to find
         the optimal amount of clusters within a specified range.
+
+    predict_reduction : bool, default=True
+        If True, use linear regression to predict the content of the eliminated
+        dimensions when doing inverse transformations. If False, the mean value
+        is used.
 
     eps : float, default=0.01
         Absolute threshold (<= 0) for a singular value of X to be considered
@@ -83,10 +89,11 @@ class LinearDiscriminantAnalysis(object):
     """
 
     def __init__(self, n_components=None, n_classes=None,
-                 eps=0.01, random_state=None):
+                 predict_reduction=True, eps=0.01, random_state=None):
         # Parameters:
         self.n_components = n_components
         self.n_classes = n_classes
+        self.predict_reduction = predict_reduction
         self.eps = eps
         self.random_state = random_state
 
@@ -98,13 +105,35 @@ class LinearDiscriminantAnalysis(object):
         self.W_ = None
         self.W_inverse_ = None
         self.eig_pairs_ = None
+        self.predictor_ = None
 
         # Random seed:
         np.random.seed(random_state)
         random.seed(random_state)
 
     def fit(self, X, y=None, min_clusters=2, max_clusters=40, verbose=False):
-        assert 0 < min_clusters <= max_clusters < X.shape[0] * X.shape[1]
+        """Fit LinearDiscriminantAnalysis model according to the given
+                   training data and parameters.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        y : array-like of shape (n_samples,), default=None
+            Target values. If not provided, GMM clustering is used to identify
+            potential classes. The number of clusters that results in the
+            smallest AIC is chosen.
+        min_clusters : int, default=2
+            The minimal number of clusters to consider if y isn't provided.
+        max_clusters : int, default=40
+            The maximal number of clusters to consider if y isn't provided.
+        verbose : bool, default=False
+            If True, displays the results.
+        """
+        n_samples = X.shape[0]
+        n_features = X.shape[1]
+
+        assert 0 < min_clusters <= max_clusters < n_samples * n_features
         assert 0 <= self.eps
 
         if y is None:
@@ -131,35 +160,131 @@ class LinearDiscriminantAnalysis(object):
         self.W_ = self._fill_rank(P=P, verbose=verbose)
 
     def transform(self, X):
-        if self.n_components is not None:
-            assert 0 < self.n_components < X.shape[1]
-            W = self.W_[:, :self.n_components]
-        else:
-            W = self.W_
+        """Project data to maximize class separation.
 
-        return X @ W
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Input data.
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+            Transformed data.
+        """
+        X_new = X @ self.W_
+
+        if self.n_components is not None:
+            n_features = X.shape[1]
+            assert 0 < self.n_components < n_features
+
+            if self.predict_reduction:
+                self.predictor_ = LinearRegression()
+                self.predictor_.fit(X_new[:, :self.n_components],
+                                    X_new[:, self.n_components:])
+            X_new = X_new[:, :self.n_components]
+
+        return X_new
 
     def fit_transform(self, X, y=None, min_clusters=2, max_clusters=40,
                       verbose=False):
+        """Fit the model with X (and y if provided) and apply the
+        transformation on X.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        y : array-like of shape (n_samples,), default=None
+            Target values. If not provided, GMM clustering is used to identify
+            potential classes. The number of clusters that results in the
+            smallest AIC is chosen.
+        min_clusters : int, default=2
+            The minimal number of clusters to consider if y isn't provided.
+        max_clusters : int, default=40
+            The maximal number of clusters to consider if y isn't provided.
+        verbose : bool, default=False
+            If True, displays the results.
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
+            Transformed data.
+        """
         self.fit(X=X, y=y, min_clusters=min_clusters,
                  max_clusters=max_clusters, verbose=verbose)
         return self.transform(X)
 
-    def inverse_transform(self, X, verbose=False):
+    def inverse_transform(self, X, predict_reduction=True, verbose=False):
+        """Transform data back to its original space.
+        In other words, return an input X_original whose transform would be X.
+
+        Parameters
+        ----------
+        X : array-like, shape (n_samples, n_components)
+            New data, where n_samples is the number of samples
+            and n_components is the number of components.
+        predict_reduction : bool, default=True
+            If True, use linear regression to predict the content of the
+            eliminated dimensions when doing inverse transformations. If False,
+            the mean value is used.
+        verbose : bool, default=False
+            If True, displays the results.
+
+        Returns
+        -------
+        X_original : array-like, shape (n_samples, n_features)
+        """
+        n_samples = X.shape[0]
+        n_features = X.shape[1]
+
         if self.W_inverse_ is None:
             self.W_inverse_ = pinv(self.W_)
-        if X.shape[1] != self.W_.shape[1]:
+
+        if n_features != self.W_.shape[1]:
+            assert n_features == self.n_components
+
             if verbose:
                 print(f"Reverse tranformation after dimensionality reduction "
                       f"may yield unexpected results: "
-                      f"{X.shape[1]} -> {self.W_.shape[1]}")
+                      f"{n_features} dim. -> {self.W_.shape[1]} dim.")
 
-            X_ = np.repeat(self.mu_.reshape(1, -1), X.shape[0], 0)
-            X_[:, :X.shape[1]] = X[:, :X.shape[1]]
+            if self.predict_reduction and predict_reduction:
+                X_ = np.empty((n_samples, self.W_.shape[1]))
+                X_[:, :self.n_components] = X[:, :self.n_components]
+                X_[:, self.n_components:] = self.predictor_.predict(X)
+            else:
+                mean = self.mu_.reshape(1, -1) @ self.W_
+                X_ = np.repeat(mean.reshape(1, -1), n_samples, 0)
+                X_[:, :n_features] = X[:, :n_features]
+
             X = X_
+
         return X @ self.W_inverse_
 
     def _clusters(self, X, min_clusters, max_clusters, verbose=False):
+        """Find the number of clusters that minimizes the AIC within the
+        specified range.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        min_clusters : int
+            The minimal number of clusters to consider if y isn't provided.
+        max_clusters : int
+            The maximal number of clusters to consider if y isn't provided.
+        verbose : bool, default=False
+            If True, displays the results.
+
+        Returns
+        -------
+        C : ndarray of shape (n_samples,)
+            Returns predicted classes.
+        """
+        n_samples = X.shape[0]
+        n_features = X.shape[1]
+
         if verbose:
             print("No target is provided: using unsupervised clustering.\n")
 
@@ -179,7 +304,7 @@ class LinearDiscriminantAnalysis(object):
             print(f"Optimal number of clusters found: "
                   f"{self.n_classes}\n")
         else:
-            assert 0 < self.n_classes < X.shape[0] * X.shape[1]
+            assert 0 < self.n_classes < n_samples * n_features
 
             if verbose:
                 print(f"Using the provided number of classes "
@@ -189,15 +314,36 @@ class LinearDiscriminantAnalysis(object):
 
         if verbose:
             print("Predicting the classes from the clusters...\n")
+
         return model.predict(X)
 
     @staticmethod
     def _means(X, y, verbose=False):
+        """Evaluate the mean (centroid) of the whole dataset and the means of
+        each classes.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        y : array-like of shape (n_samples,)
+            Target values.
+        verbose : bool, default=False
+            If True, displays the results.
+        
+        Returns
+        -------
+        mu, mu_c : pair of ndarrays of shape (n_features, 1) and (n_classes, n_features)
+            Returns the evaluated means.
+        """
+        n_features = X.shape[1]
+        n_classes = len(np.unique(y))
+
         mu = np.mean(X, axis=0).reshape(-1, 1)
         if verbose:
             print(f"Mu:\n{mu.T}\n")
 
-        mu_c = np.zeros((X.shape[1], len(np.unique(y))))
+        mu_c = np.zeros((n_features, n_classes))
         for i, target in enumerate(np.unique(y)):
             mu_c[:, i] = np.mean(X[y == target], axis=0)
             if verbose:
@@ -207,8 +353,29 @@ class LinearDiscriminantAnalysis(object):
 
     @staticmethod
     def _scatter_within(X, y, mu_c, verbose=False):
+        """Evaluate the scatter matrix of each classes (within classes).
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Training data.
+        y : array-like of shape (n_samples,)
+            Target values.
+        mu_c : array-like of shape (n_classes, n_features)
+            Mean (centroid) of each classes.
+        verbose : bool, default=False
+            If True, displays the results.
+
+        Returns
+        -------
+        N_c, S_within : pair of ndarrays of shape (n_classes, ) and (n_features, n_features)
+            Returns the size of each classes and the corresponding scatter
+            matrix (within classes).
+        """
+        n_classes = len(np.unique(y))
+
         data = []
-        N_c = np.zeros(len(np.unique(y)))
+        N_c = np.zeros(n_classes)
         for i, target in enumerate(np.unique(y)):
             delta = X[y == target].T - mu_c[:, i].reshape(-1, 1)
             data.append(delta @ delta.T)
@@ -222,6 +389,24 @@ class LinearDiscriminantAnalysis(object):
 
     @staticmethod
     def _scatter_between(mu, mu_c, N_c, verbose=False):
+        """Evaluate the scatter matrix of the whole dataset (between classes).
+
+        Parameters
+        ----------
+        mu : array-like of shape (n_features, 1)
+            Mean (centroid) of the whole dataset.
+        mu_c : array-like of shape (n_classes, n_features)
+            Mean (centroid) of each classes.
+        N_c : array-like of shape (n_classes, )
+            Size of each classes.
+        verbose : bool, default=False
+            If True, displays the results.
+
+        Returns
+        -------
+        S_between : ndarray of shape (n_features, n_features)
+            Returns the scatter matrix of the whole dataset (between classes).
+        """
         delta = np.array(mu_c - mu)
         S_between = N_c * delta @ delta.T
         if verbose:
@@ -231,6 +416,22 @@ class LinearDiscriminantAnalysis(object):
 
     @staticmethod
     def _eig_pairs(S_within, S_between):
+        """Evaluates the eigenvalues and the corresponding eigenvectors of the
+        scatter matrices ratio.
+
+        Parameters
+        ----------
+        S_within : ndarray of shape (n_features, n_features)
+            Sum of the scatter matrix of each classes (within classes)
+        S_between : ndarray of shape (n_features, n_features)
+            Scatter matrix of the whole dataset (between classes).
+
+        Returns
+        -------
+        eig_pairs : list of pairs
+            A sorted list of the eigenvalues (in decreasing order by value) and
+            their corresponding eigenvector.
+        """
         A = pinv(S_within) @ S_between
         eig_val, eig_vec = eig(A)
         eig_val = np.abs(eig_val)
@@ -240,6 +441,20 @@ class LinearDiscriminantAnalysis(object):
 
     @staticmethod
     def _filter_eig_pairs(eig_pairs, eps, verbose=False):
+        """Filters the (eigenvalue, eigenvector) pairs by their explained
+        variance.
+
+        Parameters
+        ----------
+        eig_pairs : list of pairs
+        eps : float
+        verbose : bool, default=False
+            If True, displays the results.
+
+        Returns
+        -------
+        P : ndarray of shape (?, n_features)
+        """
         eig_vals, eig_vecs = zip(*eig_pairs)
         total = sum(eig_vals)
         eigenvectors = []
@@ -265,6 +480,20 @@ class LinearDiscriminantAnalysis(object):
 
     @staticmethod
     def _fill_rank(P, verbose=False):
+        """Fills the rank of the transformation matrix with linearly
+        independent vectors in order to make the transformation invertible.
+
+        Parameters
+        ----------
+        P : ndarray of shape (?, n_features)
+        verbose : bool, default=False
+            If True, displays the results.
+
+        Returns
+        -------
+        W : ndarray of shape (n_features, n_features)
+            The transformation matrix.
+        """
         n_features = P.shape[0]
 
         while True:
