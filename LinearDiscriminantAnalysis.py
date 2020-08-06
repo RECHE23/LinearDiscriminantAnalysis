@@ -61,6 +61,19 @@ class LinearDiscriminantAnalysis(object):
     random_state : int, RandomState instance, default=None
         Pass an int for reproducible results across multiple function calls.
 
+    covariance_type : {'full' (default), 'tied', 'diag', 'spherical'}
+        String describing the type of covariance parameters to use for the
+        unsupervised clustering with Gaussian Mixture Model.
+        Must be one of:
+        'full'
+            each component has its own general covariance matrix
+        'tied'
+            all components share the same general covariance matrix
+        'diag'
+            each component has its own diagonal covariance matrix
+        'spherical'
+            each component has its own single variance
+
     Attributes
     ----------
     mu_ : array, shape (1, n_features)
@@ -89,13 +102,15 @@ class LinearDiscriminantAnalysis(object):
     """
 
     def __init__(self, n_components=None, n_classes=None,
-                 predict_reduction=True, eps=0.01, random_state=None):
+                 predict_reduction=True, eps=0.01, random_state=None,
+                 covariance_type='full'):
         # Parameters:
         self.n_components = n_components
         self.n_classes = n_classes
         self.predict_reduction = predict_reduction
         self.eps = eps
         self.random_state = random_state
+        self.covariance_type = covariance_type
 
         # Attributes:
         self.mu_ = None
@@ -294,10 +309,15 @@ class LinearDiscriminantAnalysis(object):
                       f"between {min_clusters} and {max_clusters}...\n")
 
             range_n = np.arange(min_clusters, max_clusters + 1)
-            models = [GaussianMixture(n, covariance_type='full',
-                                      random_state=self.random_state).fit(
-                X)
-                for n in range_n]
+            models = []
+            for n in range_n:
+                gmm = GaussianMixture(n, covariance_type=self.covariance_type,
+                                      random_state=self.random_state).fit(X)
+                models.append(gmm)
+                if verbose:
+                    print(f"{n} clusters: "
+                          f"\tAIC: {gmm.aic(X):.3f}, "
+                          f"\tBIC: {gmm.bic(X):.3f}  ")
             index = np.argmin(np.array([m.aic(X) for m in models]))
             model = models[index]
             self.n_classes = index + min_clusters
@@ -339,15 +359,15 @@ class LinearDiscriminantAnalysis(object):
         n_features = X.shape[1]
         n_classes = len(np.unique(y))
 
-        mu = np.mean(X, axis=0).reshape(-1, 1)
+        mu = np.mean(X, axis=0).reshape(1, -1)
         if verbose:
-            print(f"Mu:\n{mu.T}\n")
+            print(f"Mu:\n{mu}\n")
 
-        mu_c = np.zeros((n_features, n_classes))
+        mu_c = np.zeros((n_classes, n_features))
         for i, target in enumerate(np.unique(y)):
-            mu_c[:, i] = np.mean(X[y == target], axis=0)
+            mu_c[i] = np.mean(X[y == target], axis=0)
             if verbose:
-                print(f"Mu_c[{i}]:\n{mu_c[:, i]}\n")
+                print(f"Mu_c[{i}]:\n{mu_c[i]}\n")
 
         return mu, mu_c
 
@@ -377,8 +397,8 @@ class LinearDiscriminantAnalysis(object):
         data = []
         N_c = np.zeros(n_classes)
         for i, target in enumerate(np.unique(y)):
-            delta = X[y == target].T - mu_c[:, i].reshape(-1, 1)
-            data.append(delta @ delta.T)
+            delta = X[y == target] - mu_c[i]
+            data.append(delta.T @ delta)
             N_c[i] = np.sum(y == target)
 
         S_within = np.sum(data, axis=0)
@@ -393,7 +413,7 @@ class LinearDiscriminantAnalysis(object):
 
         Parameters
         ----------
-        mu : array-like of shape (n_features, 1)
+        mu : array-like of shape (1, n_features)
             Mean (centroid) of the whole dataset.
         mu_c : array-like of shape (n_classes, n_features)
             Mean (centroid) of each classes.
@@ -408,7 +428,7 @@ class LinearDiscriminantAnalysis(object):
             Returns the scatter matrix of the whole dataset (between classes).
         """
         delta = np.array(mu_c - mu)
-        S_between = N_c * delta @ delta.T
+        S_between = N_c * delta.T @ delta
         if verbose:
             print(f"S_inter:\n{S_between}\n")
 
