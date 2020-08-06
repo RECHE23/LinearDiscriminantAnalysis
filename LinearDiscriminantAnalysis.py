@@ -121,12 +121,14 @@ class LinearDiscriminantAnalysis(object):
         self.W_inverse_ = None
         self.eig_pairs_ = None
         self.predictor_ = None
+        self.clusters_ = None
 
         # Random seed:
         np.random.seed(random_state)
         random.seed(random_state)
 
-    def fit(self, X, y=None, min_clusters=2, max_clusters=40, verbose=False):
+    def fit(self, X, y=None, min_clusters=2, max_clusters=40,
+            class_clustering=True, verbose=False):
         """Fit LinearDiscriminantAnalysis model according to the given
                    training data and parameters.
 
@@ -139,9 +141,15 @@ class LinearDiscriminantAnalysis(object):
             potential classes. The number of clusters that results in the
             smallest AIC is chosen.
         min_clusters : int, default=2
-            The minimal number of clusters to consider if y isn't provided.
+            The minimal number of clusters to consider. If y isn't provided,
+            every cluster is treated as a class. If y is provided, this
+            corresponds to the minimal amount of clusters inside every classes.
         max_clusters : int, default=40
-            The maximal number of clusters to consider if y isn't provided.
+            The maximal number of clusters to consider. If y isn't provided,
+            every cluster is treated as a class. If y is provided, this
+            corresponds to the maximal amount of clusters inside every classes.
+        class_clustering : bool, default=False
+            If True, divides classes into a sum of clusters.
         verbose : bool, default=False
             If True, displays the results.
         """
@@ -152,15 +160,32 @@ class LinearDiscriminantAnalysis(object):
         assert 0 <= self.eps
 
         if y is None:
-            y = self._clusters(X=X, min_clusters=min_clusters,
-                               max_clusters=max_clusters, verbose=verbose)
+            self.clusters_ = self._clustering(X=X, min_clusters=min_clusters,
+                                              max_clusters=max_clusters,
+                                              verbose=verbose)
+        elif class_clustering:
+            self.clusters_ = - np.ones(y.shape, dtype=int)
+            for target in np.unique(y):
+                y_ = self._clustering(X=X[y == target], y=target,
+                                      min_clusters=min_clusters,
+                                      max_clusters=max_clusters,
+                                      verbose=verbose)
+                y_ += np.max(self.clusters_) + 1
+                self.clusters_[y == target] = y_
+
+            if verbose:
+                print("Targets were provided: using the labeled data and "
+                      "intra-class clustering.\n")
         else:
+            self.clusters_ = y
             if verbose:
                 print("Targets were provided: using the labeled data.\n")
 
-        self.mu_, self.mu_c_ = self._means(X=X, y=y, verbose=verbose)
+        self.mu_, self.mu_c_ = self._means(X=X, y=self.clusters_,
+                                           verbose=verbose)
 
-        N_c, self.S_within_ = self._scatter_within(X=X, y=y, mu_c=self.mu_c_,
+        N_c, self.S_within_ = self._scatter_within(X=X, y=self.clusters_,
+                                                   mu_c=self.mu_c_,
                                                    verbose=verbose)
 
         self.S_between_ = self._scatter_between(mu=self.mu_, mu_c=self.mu_c_,
@@ -202,7 +227,7 @@ class LinearDiscriminantAnalysis(object):
         return X_new
 
     def fit_transform(self, X, y=None, min_clusters=2, max_clusters=40,
-                      verbose=False):
+                      class_clustering=True, verbose=False):
         """Fit the model with X (and y if provided) and apply the
         transformation on X.
 
@@ -218,6 +243,8 @@ class LinearDiscriminantAnalysis(object):
             The minimal number of clusters to consider if y isn't provided.
         max_clusters : int, default=40
             The maximal number of clusters to consider if y isn't provided.
+        class_clustering : bool, default=False
+            If True, divides classes into a sum of clusters.
         verbose : bool, default=False
             If True, displays the results.
 
@@ -227,7 +254,8 @@ class LinearDiscriminantAnalysis(object):
             Transformed data.
         """
         self.fit(X=X, y=y, min_clusters=min_clusters,
-                 max_clusters=max_clusters, verbose=verbose)
+                 max_clusters=max_clusters, class_clustering=class_clustering,
+                 verbose=verbose)
         return self.transform(X)
 
     def inverse_transform(self, X, predict_reduction=True, verbose=False):
@@ -277,7 +305,8 @@ class LinearDiscriminantAnalysis(object):
 
         return X @ self.W_inverse_
 
-    def _clusters(self, X, min_clusters, max_clusters, verbose=False):
+    def _clustering(self, X, min_clusters, max_clusters, y=None,
+                    verbose=False):
         """Find the number of clusters that minimizes the AIC within the
         specified range.
 
@@ -289,6 +318,8 @@ class LinearDiscriminantAnalysis(object):
             The minimal number of clusters to consider if y isn't provided.
         max_clusters : int
             The maximal number of clusters to consider if y isn't provided.
+        y : array-like of shape (n_samples,), default=None
+            Target values.
         verbose : bool, default=False
             If True, displays the results.
 
@@ -303,10 +334,24 @@ class LinearDiscriminantAnalysis(object):
         if verbose:
             print("No target is provided: using unsupervised clustering.\n")
 
-        if self.n_classes is None:
+        if self.n_classes is not None and y is None:
+            assert 0 < self.n_classes < n_samples * n_features
+
             if verbose:
-                print(f"Searching for an optimal number of clusters "
-                      f"between {min_clusters} and {max_clusters}...\n")
+                print(f"Using the provided number of classes "
+                      f"({self.n_classes}) for unsupervised clustering.\n")
+            model = GaussianMixture(self.n_classes, covariance_type='full',
+                                    random_state=self.random_state).fit(X)
+        else:
+            if verbose:
+                if y is None:
+                    print("Predicting the classes from the clusters...\n")
+                    print(f"Searching for an optimal number of clusters "
+                          f"between {min_clusters} and {max_clusters}...\n")
+                else:
+                    print(f"Searching for an optimal number of clusters within"
+                          f" class {y} for values between {min_clusters} and "
+                          f"{max_clusters}...\n")
 
             range_n = np.arange(min_clusters, max_clusters + 1)
             models = []
@@ -321,19 +366,10 @@ class LinearDiscriminantAnalysis(object):
             index = np.argmin(np.array([m.aic(X) for m in models]))
             model = models[index]
             self.n_classes = index + min_clusters
-            print(f"Optimal number of clusters found: "
-                  f"{self.n_classes}\n")
-        else:
-            assert 0 < self.n_classes < n_samples * n_features
-
             if verbose:
-                print(f"Using the provided number of classes "
-                      f"({self.n_classes}) for unsupervised clustering.\n")
-            model = GaussianMixture(self.n_classes, covariance_type='full',
-                                    random_state=self.random_state).fit(X)
-
-        if verbose:
-            print("Predicting the classes from the clusters...\n")
+                a = f" for class {y}" if y is not None else ""
+                print(f"Optimal number of clusters{a} found: "
+                      f"{self.n_classes}\n")
 
         return model.predict(X)
 
