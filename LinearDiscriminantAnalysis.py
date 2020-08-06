@@ -103,7 +103,7 @@ class LinearDiscriminantAnalysis(object):
 
     def __init__(self, n_components=None, n_classes=None,
                  predict_reduction=True, eps=0.01, random_state=None,
-                 covariance_type='full'):
+                 covariance_type='spherical'):
         # Parameters:
         self.n_components = n_components
         self.n_classes = n_classes
