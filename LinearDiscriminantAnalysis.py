@@ -99,10 +99,15 @@ class LinearDiscriminantAnalysis(object):
         Pairs of eigenvalues and eigenvectors from the linear discriminant
         analysis.
 
+    dimensionality_: int
+        Minimum amount of dimensions to preserve most of the information. This
+        value is determined by using the amount of eigenvalues with a
+        significant magnitude (>= eps).
+
     """
 
     def __init__(self, n_components=None, n_classes=None,
-                 predict_reduction=True, eps=0.01, random_state=None,
+                 predict_reduction=True, eps=0.001, random_state=None,
                  covariance_type='spherical'):
         # Parameters:
         self.n_components = n_components
@@ -122,12 +127,13 @@ class LinearDiscriminantAnalysis(object):
         self.eig_pairs_ = None
         self.predictor_ = None
         self.clusters_ = None
+        self.dimensionality_ = None
 
         # Random seed:
         np.random.seed(random_state)
         random.seed(random_state)
 
-    def fit(self, X, y=None, min_clusters=2, max_clusters=40,
+    def fit(self, X, y=None, n_clusters=None, min_clusters=2, max_clusters=40,
             class_clustering=True, verbose=False):
         """Fit LinearDiscriminantAnalysis model according to the given
                    training data and parameters.
@@ -140,6 +146,9 @@ class LinearDiscriminantAnalysis(object):
             Target values. If not provided, GMM clustering is used to identify
             potential classes. The number of clusters that results in the
             smallest AIC is chosen.
+        n_clusters : int, default=None
+            The specific number of clusters to find.
+            Supersedes min_clusters and max_clusters.
         min_clusters : int, default=2
             The minimal number of clusters to consider. If y isn't provided,
             every cluster is treated as a class. If y is provided, this
@@ -162,6 +171,7 @@ class LinearDiscriminantAnalysis(object):
         if y is None:
             self.clusters_ = self._clustering(X=X, min_clusters=min_clusters,
                                               max_clusters=max_clusters,
+                                              n_clusters=n_clusters,
                                               verbose=verbose)
         elif class_clustering:
             self.clusters_ = - np.ones(y.shape, dtype=int)
@@ -169,6 +179,7 @@ class LinearDiscriminantAnalysis(object):
                 y_ = self._clustering(X=X[y == target], y=target,
                                       min_clusters=min_clusters,
                                       max_clusters=max_clusters,
+                                      n_clusters=n_clusters,
                                       verbose=verbose)
                 y_ += np.max(self.clusters_) + 1
                 self.clusters_[y == target] = y_
@@ -220,14 +231,15 @@ class LinearDiscriminantAnalysis(object):
 
             if self.predict_reduction:
                 self.predictor_ = LinearRegression()
-                self.predictor_.fit(X_new[:, :self.n_components],
-                                    X_new[:, self.n_components:])
+                self.predictor_.fit(X_new[:, :self.n_components], X)
             X_new = X_new[:, :self.n_components]
 
         return X_new
 
-    def fit_transform(self, X, y=None, min_clusters=2, max_clusters=40,
-                      class_clustering=True, verbose=False):
+    def fit_transform(self, X, y=None, n_clusters=None,
+                      min_clusters=2, max_clusters=40,
+                      class_clustering=True,
+                      verbose=False):
         """Fit the model with X (and y if provided) and apply the
         transformation on X.
 
@@ -239,6 +251,9 @@ class LinearDiscriminantAnalysis(object):
             Target values. If not provided, GMM clustering is used to identify
             potential classes. The number of clusters that results in the
             smallest AIC is chosen.
+        n_clusters : int, default=None
+            The specific number of clusters to find.
+            Supersedes min_clusters and max_clusters.
         min_clusters : int, default=2
             The minimal number of clusters to consider if y isn't provided.
         max_clusters : int, default=40
@@ -253,8 +268,10 @@ class LinearDiscriminantAnalysis(object):
         X_new : ndarray of shape (n_samples, n_components)
             Transformed data.
         """
-        self.fit(X=X, y=y, min_clusters=min_clusters,
-                 max_clusters=max_clusters, class_clustering=class_clustering,
+        self.fit(X=X, y=y, n_clusters=n_clusters,
+                 min_clusters=min_clusters,
+                 max_clusters=max_clusters,
+                 class_clustering=class_clustering,
                  verbose=verbose)
         return self.transform(X)
 
@@ -290,12 +307,10 @@ class LinearDiscriminantAnalysis(object):
             if verbose:
                 print(f"Reverse tranformation after dimensionality reduction "
                       f"may yield unexpected results: "
-                      f"{n_features} dim. -> {self.W_.shape[1]} dim.")
+                      f"{n_features} dim. expanded to {self.W_.shape[1]} dim.")
 
             if self.predict_reduction and predict_reduction:
-                X_ = np.empty((n_samples, self.W_.shape[1]))
-                X_[:, :self.n_components] = X[:, :self.n_components]
-                X_[:, self.n_components:] = self.predictor_.predict(X)
+                return self.predictor_.predict(X)
             else:
                 mean = self.mu_.reshape(1, -1) @ self.W_
                 X_ = np.repeat(mean.reshape(1, -1), n_samples, 0)
@@ -305,8 +320,8 @@ class LinearDiscriminantAnalysis(object):
 
         return X @ self.W_inverse_
 
-    def _clustering(self, X, min_clusters, max_clusters, y=None,
-                    verbose=False):
+    def _clustering(self, X, min_clusters, max_clusters, n_clusters=None,
+                    y=None, verbose=False):
         """Find the number of clusters that minimizes the AIC within the
         specified range.
 
@@ -318,6 +333,9 @@ class LinearDiscriminantAnalysis(object):
             The minimal number of clusters to consider if y isn't provided.
         max_clusters : int
             The maximal number of clusters to consider if y isn't provided.
+        n_clusters : int, default=None
+            The specific number of clusters to find.
+            Supersedes min_clusters and max_clusters.
         y : array-like of shape (n_samples,), default=None
             Target values.
         verbose : bool, default=False
@@ -344,14 +362,18 @@ class LinearDiscriminantAnalysis(object):
                                     random_state=self.random_state).fit(X)
         else:
             if verbose:
-                if y is None:
-                    print("Predicting the classes from the clusters...\n")
-                    print(f"Searching for an optimal number of clusters "
-                          f"between {min_clusters} and {max_clusters}...\n")
-                else:
+                if n_clusters is not None:
+                    min_clusters = max_clusters = n_clusters
+                    print(f"Using the provided number of clusters "
+                          f"({n_clusters}) for unsupervised clustering.\n")
+                elif y is not None:
                     print(f"Searching for an optimal number of clusters within"
                           f" class {y} for values between {min_clusters} and "
                           f"{max_clusters}...\n")
+                else:
+                    print("Predicting the classes from the clusters...\n")
+                    print(f"Searching for an optimal number of clusters "
+                          f"between {min_clusters} and {max_clusters}...\n")
 
             range_n = np.arange(min_clusters, max_clusters + 1)
             models = []
@@ -366,7 +388,7 @@ class LinearDiscriminantAnalysis(object):
             index = np.argmin(np.array([m.aic(X) for m in models]))
             model = models[index]
             self.n_classes = index + min_clusters
-            if verbose:
+            if verbose and n_clusters is None:
                 a = f" for class {y}" if y is not None else ""
                 print(f"Optimal number of clusters{a} found: "
                       f"{self.n_classes}\n")
@@ -495,8 +517,7 @@ class LinearDiscriminantAnalysis(object):
         return sorted(zip(eig_val, eig_vec.T), key=lambda k: k[0],
                       reverse=True)
 
-    @staticmethod
-    def _filter_eig_pairs(eig_pairs, eps, verbose=False):
+    def _filter_eig_pairs(self, eig_pairs, eps, verbose=False):
         """Filters the (eigenvalue, eigenvector) pairs by their explained
         variance.
 
@@ -528,9 +549,11 @@ class LinearDiscriminantAnalysis(object):
                 eigenvalue = v[0]
                 print(f"Singular value {i + 1:}: "
                       f"\t{percentage:<8.2%} "
-                      f"\t{eigenvalue:<8.6} \t {verdict}")
+                      f"\t{eigenvalue:<8.6f} \t {verdict}")
         if verbose:
             print()
+
+        self.dimensionality_ = len(eigenvectors)
 
         return np.vstack(eigenvectors).T.real
 
